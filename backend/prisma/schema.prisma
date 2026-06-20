@@ -1,0 +1,44 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Tabel Pengguna (Operator VTS & Admin Pelayanan)
+model User {
+  id       Int      @id @default(autoincrement())
+  username String   @unique
+  password String
+  role     Role     @default(OPERATOR)
+  shift    Shift?   // Penanda untuk Operator (PAGI/MALAM)
+  reports  Report[] 
+}
+
+// Tabel Laporan Utama (Wadah rekapan 1 shift)
+model Report {
+  id         Int      @id @default(autoincrement())
+  date       DateTime @default(now())
+  shift      Shift
+  status     Status   @default(PENDING) 
+  fileUrl    String
+  operatorId Int
+  operator   User     @relation(fields: [operatorId], references: [id])
+}
+
+enum Role {
+  OPERATOR
+  ADMIN
+}
+
+enum Shift {
+  PAGI
+  MALAM
+}
+
+enum Status {
+  PENDING
+  VALIDATED
+}
