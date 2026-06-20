@@ -148,7 +148,7 @@ Pastikan Anda telah menginstal software berikut pada sistem Anda:
    Buat berkas bernama `.env` di dalam direktori `backend/` (jika belum ada) dan isi dengan konfigurasi berikut:
    ```env
    # Ganti URL PostgreSQL dengan string koneksi database Anda
-   DATABASE_URL="postgresql://neondb_owner:npg_G2YSAyNnPp6t@ep-rough-king-ahh17o49-pooler.c-3.us-east-1.aws.neon.tech/vts-panjang-web?sslmode=require&channel_binding=require"
+  DATABASE_URL="postgresql://[USER]:[PASSWORD]@[HOST]/vts-panjang-web?sslmode=require"
    PORT=5000
    JWT_SECRET="rahasia_vts_panjang_123"
    ```
