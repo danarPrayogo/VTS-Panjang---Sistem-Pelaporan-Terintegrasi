@@ -33,18 +33,32 @@ Proyek ini dibangun menggunakan arsitektur monorepo dengan teknologi modern beri
 ## ✨ Fitur Utama
 
 ### 1. Autentikasi & Manajemen Pengguna (Role-Based Access Control)
-Sistem memiliki dua tingkat akses (role) untuk pengguna:
-* **Operator VTS (Shift Pagi & Shift Malam):** Memiliki akses untuk mengunggah berkas laporan harian operasional kapal (hanya format PDF) sesuai dengan shift kerja mereka (Pagi/Malam).
-* **Admin Pelayanan:** Memiliki akses penuh untuk memantau semua aktivitas laporan harian, meninjau isi laporan, menyetujui (validasi) laporan dari Operator, serta menggabungkan laporan Pagi & Malam menjadi laporan harian gabungan.
+Sistem memiliki tiga tingkat akses (role) untuk pengguna:
+* **Operator VTS (Shift Pagi & Shift Malam):** Dapat mengunggah berkas laporan harian operasional kapal (format PDF/Excel) sesuai dengan shift kerja mereka. Pengunggahan berkas menggunakan sistem **Drag & Drop** interaktif.
+* **Admin Pelayanan:** Memantau semua aktivitas laporan harian, meninjau isi laporan, menyetujui (validasi) laporan dari Operator, serta menggabungkan laporan Pagi & Malam menjadi laporan harian gabungan.
+* **Super Admin:** Memiliki semua akses Admin Pelayanan, ditambah hak akses eksklusif ke **Tempat Sampah (Trash)** untuk memulihkan laporan yang telah dihapus dalam rentang waktu 30 hari terakhir. Registrasi akun Super Admin dilakukan secara manual (seeding) untuk keamanan.
 
-### 2. Unggah Dokumen Laporan (File Upload)
-Operator VTS dapat mengunggah berkas laporan harian kapal dalam format PDF sesuai dengan tanggal laporan dan shift kerja mereka. Jika laporan di tanggal & shift yang sama diunggah ulang, sistem akan memperbarui berkas lama di server lokal secara otomatis dan menyetel ulang statusnya ke `PENDING`.
+### 2. Unggah Dokumen Laporan (Drag & Drop + Multi-Upload)
+* **Drag & Drop:** Operator dapat mengunggah berkas PDF atau Excel dengan cara menyeret berkas langsung ke area kotak upload atau mengeklik kotak tersebut.
+* **Multi-Upload di Tanggal & Shift yang Sama:** Sistem mendukung penyimpanan beberapa laporan yang berbeda di tanggal dan shift yang sama secara bersamaan (tidak akan menimpa laporan sebelumnya).
 
-### 3. Tinjauan & Validasi Laporan (Review & Approve)
-Setiap laporan yang baru diunggah oleh Operator akan berstatus `PENDING`. Admin Pelayanan dapat melihat daftar seluruh laporan, mengunduh/membuka berkas tersebut, dan menyetujuinya sehingga status berubah menjadi `VALIDATED`.
+### 3. Tinjauan & Validasi Laporan (Pratinjau PDF Instan)
+Setiap laporan yang baru diunggah oleh Operator akan berstatus `PENDING`. Admin/Super Admin dapat meninjau isi berkas PDF secara instan di dalam portal web melalui modal pratinjau (*PDF Preview iframe*) tanpa perlu mengunduh file secara lokal terlebih dahulu (untuk file Excel akan diunduh secara otomatis). Laporan yang disetujui statusnya berubah menjadi `VALIDATED`.
 
-### 4. Penggabungan PDF Otomatis (Merge PDF)
-Apabila kedua laporan shift (Pagi dan Malam) pada tanggal tertentu telah diunggah dan disetujui (`VALIDATED`), Admin Pelayanan dapat memicu proses penggabungan berkas. Sistem akan secara otomatis menggabungkan dokumen PDF dari kedua shift tersebut menjadi satu berkas PDF final harian yang siap diarsipkan atau diserahkan ke pimpinan.
+### 4. Penggabungan Laporan Otomatis (Merge PDF & Excel)
+Apabila kedua laporan shift (Pagi dan Malam) pada tanggal tertentu telah diunggah dan disetujui (`VALIDATED`), Admin Pelayanan dapat memicu proses penggabungan berkas. Sistem secara otomatis mendukung:
+* **Penggabungan PDF:** Menggabungkan lembar halaman PDF shift pagi dan malam secara berurutan.
+* **Penggabungan Excel (.xlsx):** Menggabungkan tabel baris laporan dari file pagi dan malam ke dalam satu worksheet tunggal lengkap dengan re-numbering kolom No.
+
+### 5. Soft-Delete Laporan & Tempat Sampah (Retention 30 Hari)
+* Semua pengguna (Operator/Admin/Super Admin) dapat menghapus laporan (Operator hanya bisa menghapus laporan berstatus `PENDING` miliknya).
+* Laporan yang dihapus tidak langsung hilang, melainkan dipindahkan ke **Tempat Sampah** selama 30 hari.
+* **Super Admin** dapat mengakses menu Tempat Sampah untuk memulihkan (*restore*) laporan tersebut kembali aktif.
+* Sistem secara otomatis menghapus berkas fisik di server dan baris database secara permanen setelah 30 hari terhitung sejak tanggal penghapusan (*auto-cleanup*).
+
+### 6. Nama Berkas Asli & Keterbacaan File
+* Sistem menyimpan nama asli berkas yang diunggah pengguna ke kolom database (`fileName`) dan menampilkannya di tabel frontend lengkap dengan pemotongan otomatis (`truncate`) dan tooltip jika nama berkas terlalu panjang.
+* File yang disimpan ke folder `uploads` server akan tetap mempertahankan nama berkas aslinya dengan ditambahkan suffix timestamp unik (misal: `Laporan_Harian-1719123456789.pdf`) untuk mencegah konflik berkas.
 
 ---
 
@@ -81,7 +95,7 @@ vts-panjang-web/
 Struktur tabel di PostgreSQL dikelola secara efisien menggunakan model Prisma berikut:
 
 ```prisma
-// Pengguna sistem
+// Tabel Pengguna (Operator VTS, Admin Pelayanan, & Super Admin)
 model User {
   id       Int      @id @default(autoincrement())
   username String   @unique
@@ -97,14 +111,17 @@ model Report {
   date       DateTime @default(now())
   shift      Shift    // PAGI atau MALAM
   status     Status   @default(PENDING) // PENDING atau VALIDATED
-  fileUrl    String   // Jalur berkas PDF di server
+  fileUrl    String   // Jalur berkas di disk server
+  fileName   String?  // Nama asli file saat diunggah (misal: Laporan 23.xlsx)
   operatorId Int
   operator   User     @relation(fields: [operatorId], references: [id])
+  deletedAt  DateTime? // Tanggal penghapusan (null jika masih aktif)
 }
 
 enum Role {
   OPERATOR
   ADMIN
+  SUPER_ADMIN
 }
 
 enum Shift {
@@ -156,13 +173,20 @@ Pastikan Anda telah menginstal software berikut pada sistem Anda:
    > Ganti `DATABASE_URL` dengan database PostgreSQL Anda sendiri jika database default di atas tidak dapat diakses atau ingin menggunakan lingkungan database yang terpisah.
 
 4. **Sinkronisasi Skema Database & Generate Prisma Client:**
-   Jalankan perintah berikut agar struktur tabel terbuat secara otomatis di database PostgreSQL Anda:
+   Jalankan perintah berikut agar struktur tabel terbuat secara otomatis di database PostgreSQL Anda serta memperbarui library Prisma Client lokal:
    ```bash
    npx prisma db push
    npx prisma generate
    ```
 
-5. **Jalankan Server Backend:**
+5. **Daftarkan Akun Super Admin Awal:**
+   Jalankan script seed database untuk membuat akun Super Admin awal secara manual (karena registrasi SUPER_ADMIN tidak dibuka secara publik di UI):
+   ```bash
+   node seed_super_admin.js
+   ```
+   * *Akun Default:* **Username:** `giancio` | **Password:** `giancio123` | **Role:** `SUPER_ADMIN`
+
+6. **Jalankan Server Backend:**
    Mulai server dengan perintah:
    ```bash
    node index.js

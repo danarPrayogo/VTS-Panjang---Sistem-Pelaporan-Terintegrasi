@@ -24,13 +24,16 @@ model Report {
   shift      Shift
   status     Status   @default(PENDING) 
   fileUrl    String
+  fileName   String?  // Nama berkas asli (sebelum di-rename oleh multer)
   operatorId Int
   operator   User     @relation(fields: [operatorId], references: [id])
+  deletedAt  DateTime? // Tanggal penghapusan untuk soft-delete (null jika aktif)
 }
 
 enum Role {
   OPERATOR
   ADMIN
+  SUPER_ADMIN
 }
 
 enum Shift {

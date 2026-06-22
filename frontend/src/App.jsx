@@ -561,6 +561,50 @@ function Dashboard({ onLogout, showToast }) {
 
   const [reports, setReports] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [trashReports, setTrashReports] = useState([]);
+  const [trashLoading, setTrashLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState('reports');
+  const [isDragging, setIsDragging] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState('');
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const file = e.dataTransfer.files[0];
+      const fileType = file.type;
+      const allowedTypes = [
+        'application/pdf',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.ms-excel'
+      ];
+      if (allowedTypes.includes(fileType) || file.name.endsWith('.pdf') || file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+        setPdfFile(file);
+      } else {
+        showToast('Hanya berkas PDF atau Excel (.xlsx/.xls) yang diperbolehkan!', 'error');
+      }
+    }
+  };
+
+  const handleBoxClick = (e) => {
+    if (e.target.id !== 'report-file') {
+      document.getElementById('report-file').click();
+    }
+  };
+
+  // Perhitungan statistik dokumen dinamis
+  const totalDocs = reports.length;
+  const validatedDocs = reports.filter(r => r.status === 'VALIDATED').length;
+  const pendingDocs = reports.filter(r => r.status === 'PENDING').length;
 
   // Form Operator
   const [uploadDate, setUploadDate] = useState(new Date().toISOString().substring(0, 10));
@@ -593,9 +637,34 @@ function Dashboard({ onLogout, showToast }) {
     }
   };
 
+  const fetchTrashReports = async () => {
+    setTrashLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/reports/trash`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setTrashReports(data);
+      } else {
+        console.error("Gagal mengambil data trash:", data.error);
+      }
+    } catch (error) {
+      console.error("Kesalahan jaringan:", error);
+    } finally {
+      setTrashLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchReports();
   }, []);
+
+  useEffect(() => {
+    if (activeTab === 'trash') {
+      fetchTrashReports();
+    }
+  }, [activeTab]);
 
   const handleUpload = async (e) => {
     e.preventDefault();
@@ -666,6 +735,61 @@ function Dashboard({ onLogout, showToast }) {
     });
   };
 
+  const handleDelete = (id) => {
+    setConfirmModal({
+      show: true,
+      message: 'Apakah Anda yakin ingin menghapus laporan ini? Laporan akan dipindahkan ke tempat sampah dan dapat dipulihkan dalam waktu 30 hari.',
+      onConfirm: async () => {
+        setConfirmModal(prev => ({ ...prev, show: false }));
+        try {
+          const res = await fetch(`${API_BASE}/api/reports/${id}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          const data = await res.json();
+          if (res.ok) {
+            showToast(data.message, 'success');
+            fetchReports();
+          } else {
+            showToast('Gagal menghapus: ' + (data.error || 'Terjadi kesalahan'), 'error');
+          }
+        } catch (err) {
+          showToast('Kesalahan jaringan.', 'error');
+        }
+      }
+    });
+  };
+
+  const handleRestore = async (id) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/reports/${id}/restore`, {
+        method: 'PATCH',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast(data.message, 'success');
+        fetchTrashReports();
+        fetchReports();
+      } else {
+        showToast('Gagal memulihkan: ' + (data.error || 'Terjadi kesalahan'), 'error');
+      }
+    } catch (err) {
+      showToast('Kesalahan jaringan.', 'error');
+    }
+  };
+
+  const handleOpenFile = (e, fileUrl) => {
+    const isPdf = fileUrl.toLowerCase().endsWith('.pdf');
+    if (isPdf) {
+      e.preventDefault();
+      setPreviewUrl(`${API_BASE}${fileUrl}`);
+    } else {
+      // Excel files cannot be previewed in iframe, they will download naturally.
+      showToast('Berkas Excel tidak dapat dipratinjau secara langsung, mengunduh berkas...', 'info');
+    }
+  };
+
   const handleMerge = async (e) => {
     e.preventDefault();
     setMerging(true);
@@ -715,7 +839,7 @@ function Dashboard({ onLogout, showToast }) {
               <div className="hidden sm:flex flex-col text-right">
                 <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Peran Pengguna</span>
                 <span className="text-sm text-indigo-650 font-bold tracking-tight">
-                  {role === 'ADMIN' ? 'Admin Pelayanan' : `Operator Shift ${userShift}`}
+                  {role === 'SUPER_ADMIN' ? 'Super Admin' : role === 'ADMIN' ? 'Admin Pelayanan' : `Operator Shift ${userShift}`}
                 </span>
               </div>
               <button
@@ -745,11 +869,53 @@ function Dashboard({ onLogout, showToast }) {
             <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-100">
               Peran: {role}
             </span>
-            {role !== 'ADMIN' && (
+            {role !== 'ADMIN' && role !== 'SUPER_ADMIN' && (
               <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold ${userShift === 'PAGI' ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-violet-50 text-violet-750 border border-violet-200'}`}>
                 Shift: {userShift}
               </span>
             )}
+          </div>
+        </div>
+
+        {/* Stats Metrics Section */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          {/* Card 1: Total Dokumen */}
+          <div className="bg-white border border-slate-200/80 p-6 rounded-2xl shadow-sm hover:shadow-md transition-all duration-200 hover:-translate-y-0.5 flex items-center space-x-4">
+            <div className="p-3.5 bg-indigo-50 text-indigo-600 rounded-2xl border border-indigo-100/50">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+              </svg>
+            </div>
+            <div>
+              <div className="text-2xl font-black text-slate-900 tracking-tight">{totalDocs}</div>
+              <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Total Dokumen Laporan</div>
+            </div>
+          </div>
+
+          {/* Card 2: Sudah Divalidasi */}
+          <div className="bg-white border border-slate-200/80 p-6 rounded-2xl shadow-sm hover:shadow-md transition-all duration-200 hover:-translate-y-0.5 flex items-center space-x-4">
+            <div className="p-3.5 bg-emerald-50 text-emerald-600 rounded-2xl border border-emerald-100/50">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+              </svg>
+            </div>
+            <div>
+              <div className="text-2xl font-black text-slate-900 tracking-tight">{validatedDocs}</div>
+              <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Sudah Divalidasi</div>
+            </div>
+          </div>
+
+          {/* Card 3: Belum Divalidasi */}
+          <div className="bg-white border border-slate-200/80 p-6 rounded-2xl shadow-sm hover:shadow-md transition-all duration-200 hover:-translate-y-0.5 flex items-center space-x-4">
+            <div className="p-3.5 bg-amber-50 text-amber-600 rounded-2xl border border-amber-100/50">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+              </svg>
+            </div>
+            <div>
+              <div className="text-2xl font-black text-slate-900 tracking-tight">{pendingDocs}</div>
+              <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Belum Divalidasi</div>
+            </div>
           </div>
         </div>
 
@@ -793,23 +959,33 @@ function Dashboard({ onLogout, showToast }) {
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-550 uppercase tracking-wider">Berkas Laporan</label>
-                  <div className="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-slate-200 border-dashed rounded-xl bg-slate-55/50 hover:bg-slate-50 hover:border-indigo-500/55 transition-all cursor-pointer relative">
-                    <div className="space-y-1 text-center">
+                  <div
+                    onClick={handleBoxClick}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                    className={`mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-dashed rounded-xl transition-all cursor-pointer relative ${
+                      isDragging 
+                        ? 'border-indigo-500 bg-indigo-50/30 scale-[0.99] shadow-inner' 
+                        : 'border-slate-200 bg-slate-55/50 hover:bg-slate-50 hover:border-indigo-500/55'
+                    }`}
+                  >
+                    <div className="space-y-1 text-center pointer-events-none">
                       <svg className="mx-auto h-10 w-10 text-slate-400" stroke="currentColor" fill="none" viewBox="0 0 48 48">
                         <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                       </svg>
                       <div className="flex text-sm text-slate-500 justify-center">
-                        <label className="relative cursor-pointer rounded-md font-semibold text-indigo-600 hover:text-indigo-700">
-                          <span>Pilih berkas PDF atau Excel</span>
-                          <input
-                            id="report-file"
-                            type="file"
-                            accept="application/pdf, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel"
-                            onChange={(e) => setPdfFile(e.target.files[0])}
-                            className="sr-only"
-                            required
-                          />
-                        </label>
+                        <span className="font-semibold text-indigo-600 hover:text-indigo-700">
+                          Pilih berkas PDF atau Excel
+                        </span>
+                        <input
+                          id="report-file"
+                          type="file"
+                          accept="application/pdf, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel"
+                          onChange={(e) => setPdfFile(e.target.files[0])}
+                          onClick={(e) => e.stopPropagation()}
+                          className="sr-only"
+                        />
                       </div>
                       <p className="text-xs text-slate-455">Format PDF, XLSX, atau XLS (Max 10MB)</p>
                     </div>
@@ -836,7 +1012,7 @@ function Dashboard({ onLogout, showToast }) {
           )}
 
           {/* Admin Panel */}
-          {role === 'ADMIN' && (
+          {(role === 'ADMIN' || role === 'SUPER_ADMIN') && (
             <div className="lg:col-span-1 bg-white border border-slate-200/80 p-6 rounded-2xl shadow-sm h-fit space-y-6">
               <div>
                 <h3 className="text-base font-bold text-slate-900 flex items-center">
@@ -896,18 +1072,38 @@ function Dashboard({ onLogout, showToast }) {
 
           {/* Tabel Riwayat */}
           <div className="lg:col-span-2 bg-white border border-slate-200/80 p-6 rounded-2xl shadow-sm space-y-4">
-            <div className="flex justify-between items-center">
-              <div>
-                <h3 className="text-base font-bold text-slate-900 flex items-center">
-                  <svg className="w-4 h-4 mr-2 text-indigo-650" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+              <div className="flex items-center space-x-6">
+                <button
+                  onClick={() => setActiveTab('reports')}
+                  className={`text-base font-bold pb-2 flex items-center transition-all cursor-pointer ${activeTab === 'reports' ? 'text-indigo-650 border-b-2 border-indigo-650' : 'text-slate-400 hover:text-slate-600'}`}
+                >
+                  <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
                   </svg>
-                  {role === 'ADMIN' ? 'Antrean Tinjauan Laporan VTS' : 'Riwayat Pengiriman Laporan'}
-                </h3>
-                <p className="text-xs text-slate-400 mt-0.5">Daftar rekap laporan harian yang tersimpan.</p>
+                  {role === 'ADMIN' || role === 'SUPER_ADMIN' ? 'Antrean Tinjauan Laporan VTS' : 'Riwayat Pengiriman Laporan'}
+                </button>
+                {role === 'SUPER_ADMIN' && (
+                  <button
+                    onClick={() => setActiveTab('trash')}
+                    className={`text-base font-bold pb-2 flex items-center transition-all cursor-pointer ${activeTab === 'trash' ? 'text-rose-600 border-b-2 border-rose-600' : 'text-slate-400 hover:text-slate-600'}`}
+                  >
+                    <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                    </svg>
+                    Tempat Sampah
+                  </button>
+                )}
               </div>
               <button
-                onClick={() => { setLoading(true); fetchReports(); }}
+                onClick={() => {
+                  if (activeTab === 'reports') {
+                    setLoading(true);
+                    fetchReports();
+                  } else {
+                    fetchTrashReports();
+                  }
+                }}
                 className="p-2 bg-white hover:bg-slate-50 text-slate-655 rounded-lg border border-slate-200 hover:border-slate-300 transition-colors cursor-pointer"
                 title="Perbarui Tabel"
               >
@@ -917,7 +1113,76 @@ function Dashboard({ onLogout, showToast }) {
               </button>
             </div>
 
-            {loading ? (
+            {activeTab === 'trash' ? (
+              trashLoading ? (
+                <div className="flex flex-col items-center justify-center py-12 space-y-2">
+                  <div className="w-8 h-8 border-4 border-rose-650 border-t-transparent rounded-full animate-spin"></div>
+                  <p className="text-xs text-slate-405">Memuat tempat sampah...</p>
+                </div>
+              ) : trashReports.length === 0 ? (
+                <div className="text-center py-16 border border-slate-100 rounded-xl bg-slate-50/20">
+                  <svg className="mx-auto h-10 w-10 text-slate-350" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                  </svg>
+                  <p className="mt-3 text-sm font-semibold text-slate-600">Tempat Sampah Kosong</p>
+                  <p className="text-xs text-slate-450 mt-0.5">Tidak ada laporan yang dihapus baru-baru ini.</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-xl border border-slate-200">
+                  <table className="min-w-full divide-y divide-slate-100">
+                    <thead className="bg-slate-50">
+                      <tr>
+                        <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-555 uppercase tracking-wider">Tanggal</th>
+                        <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-555 uppercase tracking-wider">Shift</th>
+                        <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-555 uppercase tracking-wider">Nama Berkas</th>
+                        <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-555 uppercase tracking-wider">Operator</th>
+                        <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-555 uppercase tracking-wider">Sisa Waktu</th>
+                        <th className="px-6 py-3.5 text-right text-xs font-bold text-slate-555 uppercase tracking-wider">Aksi</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-slate-100">
+                      {trashReports.map((report) => {
+                        const daysLeft = Math.max(0, 30 - Math.floor((new Date() - new Date(report.deletedAt)) / (1000 * 60 * 60 * 24)));
+                        return (
+                          <tr key={report.id} className="hover:bg-slate-50/50 transition-colors">
+                            <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-slate-900">
+                              {formatDate(report.date)}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold ${report.shift === 'PAGI' ? 'bg-sky-50 text-sky-700 border border-sky-100' : 'bg-indigo-50 text-indigo-700 border border-indigo-100'}`}>
+                                {report.shift}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-655 font-medium max-w-[200px] truncate" title={report.fileName || report.fileUrl.split('/').pop()}>
+                              {report.fileName || report.fileUrl.split('/').pop()}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-655 font-medium">
+                              {report.operator?.username || 'Tidak Diketahui'}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-655 font-medium">
+                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${daysLeft > 7 ? 'bg-amber-50 text-amber-700 border border-amber-100' : 'bg-rose-50 text-rose-700 border border-rose-100'}`}>
+                                {daysLeft} Hari Tersisa
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
+                              <button
+                                onClick={() => handleRestore(report.id)}
+                                className="inline-flex items-center px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                              >
+                                <svg className="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.27 15M21 12h-5"></path>
+                                </svg>
+                                Pulihkan
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            ) : loading ? (
               <div className="flex flex-col items-center justify-center py-12 space-y-2">
                 <div className="w-8 h-8 border-4 border-indigo-650 border-t-transparent rounded-full animate-spin"></div>
                 <p className="text-xs text-slate-405">Menghubungkan ke database...</p>
@@ -937,7 +1202,8 @@ function Dashboard({ onLogout, showToast }) {
                     <tr>
                       <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-550 uppercase tracking-wider">Tanggal</th>
                       <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-555 uppercase tracking-wider">Shift</th>
-                      {role === 'ADMIN' && (
+                      <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-555 uppercase tracking-wider">Nama Berkas</th>
+                      {(role === 'ADMIN' || role === 'SUPER_ADMIN') && (
                         <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-555 uppercase tracking-wider">Operator</th>
                       )}
                       <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-555 uppercase tracking-wider">Status</th>
@@ -955,7 +1221,10 @@ function Dashboard({ onLogout, showToast }) {
                             {report.shift}
                           </span>
                         </td>
-                        {role === 'ADMIN' && (
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-655 font-medium max-w-[200px] truncate" title={report.fileName || report.fileUrl.split('/').pop()}>
+                          {report.fileName || report.fileUrl.split('/').pop()}
+                        </td>
+                        {(role === 'ADMIN' || role === 'SUPER_ADMIN') && (
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-655 font-medium">
                             {report.operator?.username || 'Tidak Diketahui'}
                           </td>
@@ -970,6 +1239,7 @@ function Dashboard({ onLogout, showToast }) {
                             href={`${API_BASE}${report.fileUrl}`}
                             target="_blank"
                             rel="noreferrer"
+                            onClick={(e) => handleOpenFile(e, report.fileUrl)}
                             className="inline-flex items-center px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 rounded-lg text-xs font-bold transition-all hover:text-indigo-650 hover:border-indigo-100"
                           >
                             <svg className="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -978,12 +1248,24 @@ function Dashboard({ onLogout, showToast }) {
                             </svg>
                             Buka File
                           </a>
-                          {role === 'ADMIN' && (
+                          {(role === 'ADMIN' || role === 'SUPER_ADMIN') && (
                             <button
                               onClick={() => handleValidate(report.id, report.status)}
                               className={`inline-flex items-center px-3 py-1.5 rounded-lg text-xs font-bold border transition-all cursor-pointer ${report.status === 'VALIDATED' ? 'bg-amber-50 hover:bg-amber-100/80 text-amber-750 border-amber-200' : 'bg-emerald-50 hover:bg-emerald-100/80 text-emerald-755 border-emerald-200'}`}
                             >
                               {report.status === 'VALIDATED' ? 'Batalkan Validasi' : 'Setujui (Validasi)'}
+                            </button>
+                          )}
+                          {((role === 'ADMIN' || role === 'SUPER_ADMIN') || (role === 'OPERATOR' && report.status === 'PENDING')) && (
+                            <button
+                              onClick={() => handleDelete(report.id)}
+                              className="inline-flex items-center px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                              title="Hapus Laporan"
+                            >
+                              <svg className="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                              </svg>
+                              Hapus
                             </button>
                           )}
                         </td>
@@ -1004,6 +1286,38 @@ function Dashboard({ onLogout, showToast }) {
         onConfirm={confirmModal.onConfirm}
         onCancel={() => setConfirmModal({ show: false, message: '', onConfirm: null })}
       />
+
+      {/* PDF Preview Modal */}
+      {previewUrl && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-5xl h-[90vh] flex flex-col relative animate-in fade-in zoom-in-95 duration-200">
+            {/* Modal Header */}
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 rounded-t-3xl">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 font-sans">Pratinjau Laporan (PDF)</h3>
+                <p className="text-xs text-slate-400">Menampilkan dokumen PDF secara langsung dari server.</p>
+              </div>
+              <button
+                onClick={() => setPreviewUrl('')}
+                className="text-slate-400 hover:text-slate-655 p-1.5 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path>
+                </svg>
+              </button>
+            </div>
+            
+            {/* Modal Body */}
+            <div className="flex-1 p-4 bg-slate-100 rounded-b-3xl">
+              <iframe
+                src={previewUrl}
+                title="Pratinjau Dokumen PDF"
+                className="w-full h-full rounded-2xl border-0 bg-white"
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

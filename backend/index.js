@@ -33,8 +33,12 @@ const storage = multer.diskStorage({
     cb(null, 'uploads/');
   },
   filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
+    const ext = path.extname(file.originalname);
+    const baseName = path.basename(file.originalname, ext)
+      .replace(/[^a-zA-Z0-9\-_ ]/g, '') // bersihkan karakter aneh/berbahaya, biarkan spasi, dash, underscore
+      .trim();
+    // Gunakan format: NamaAsli-Timestamp.ekstensi
+    cb(null, `${baseName}-${Date.now()}${ext}`);
   }
 });
 
@@ -137,71 +141,33 @@ app.post('/api/reports/upload', authenticateToken, upload.single('file'), async 
   }
 
   try {
-    const reportDate = new Date(date);
-    const startOfDay = new Date(reportDate);
-    startOfDay.setUTCHours(0, 0, 0, 0);
-    const endOfDay = new Date(reportDate);
-    endOfDay.setUTCHours(23, 59, 59, 999);
-
-    // Cek apakah laporan dengan shift dan tanggal yang sama sudah pernah diunggah
-    const existingReport = await prisma.report.findFirst({
-      where: {
-        date: {
-          gte: startOfDay,
-          lte: endOfDay
-        },
-        shift: shift
-      }
-    });
-
     const fileUrl = `/uploads/${req.file.filename}`;
 
-    if (existingReport) {
-      // Hapus file lama dari server lokal
-      const oldPath = path.join(__dirname, existingReport.fileUrl);
-      if (fs.existsSync(oldPath)) {
-        try {
-          fs.unlinkSync(oldPath);
-        } catch (unlinkError) {
-          console.error("Gagal menghapus file lama:", unlinkError);
-        }
+    // Simpan laporan baru ke database (selalu create baru agar mendukung multi-upload pada tanggal/shift yang sama)
+    const newReport = await prisma.report.create({
+      data: {
+        date: new Date(date),
+        shift,
+        fileUrl,
+        fileName: req.file.originalname, // Simpan nama berkas asli
+        status: 'PENDING',
+        operatorId: req.user.userId
       }
-
-      // Update isi laporan yang ada dan kembalikan statusnya ke PENDING
-      const updatedReport = await prisma.report.update({
-        where: { id: existingReport.id },
-        data: {
-          fileUrl,
-          status: 'PENDING',
-          operatorId: req.user.userId
-        }
-      });
-      return res.json({ message: "Laporan shift berhasil diperbarui!", data: updatedReport });
-    } else {
-      // Simpan laporan baru ke database
-      const newReport = await prisma.report.create({
-        data: {
-          date: new Date(date),
-          shift,
-          fileUrl,
-          status: 'PENDING',
-          operatorId: req.user.userId
-        }
-      });
-      return res.status(201).json({ message: "Laporan shift berhasil diunggah!", data: newReport });
-    }
+    });
+    return res.status(201).json({ message: "Laporan shift berhasil diunggah!", data: newReport });
   } catch (error) {
     console.error("Gagal menyimpan laporan:", error);
     res.status(500).json({ error: "Terjadi kesalahan saat mengunggah laporan ke server." });
   }
 });
 
-// 2. API GET DAFTAR LAPORAN (Admin melihat semua, Operator melihat milik sendiri)
+// 2. API GET DAFTAR LAPORAN (Admin/Super Admin melihat semua, Operator melihat milik sendiri)
 app.get('/api/reports', authenticateToken, async (req, res) => {
   try {
     let reports;
-    if (req.user.role === 'ADMIN') {
+    if (req.user.role === 'ADMIN' || req.user.role === 'SUPER_ADMIN') {
       reports = await prisma.report.findMany({
+        where: { deletedAt: null },
         include: {
           operator: {
             select: { username: true }
@@ -211,7 +177,10 @@ app.get('/api/reports', authenticateToken, async (req, res) => {
       });
     } else {
       reports = await prisma.report.findMany({
-        where: { operatorId: req.user.userId },
+        where: { 
+          operatorId: req.user.userId,
+          deletedAt: null
+        },
         orderBy: { date: 'desc' }
       });
     }
@@ -222,10 +191,140 @@ app.get('/api/reports', authenticateToken, async (req, res) => {
   }
 });
 
-// 3. API VALIDASI STATUS LAPORAN (Untuk Admin)
+// 2b. API DELETE LAPORAN (Soft-Delete - Operator/Admin/Super Admin)
+app.delete('/api/reports/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const report = await prisma.report.findUnique({
+      where: { id: parseInt(id) }
+    });
+
+    if (!report) {
+      return res.status(404).json({ error: "Laporan tidak ditemukan." });
+    }
+
+    // Otorisasi:
+    // - OPERATOR hanya bisa menghapus laporan miliknya yang berstatus PENDING
+    if (req.user.role === 'OPERATOR') {
+      if (report.operatorId !== req.user.userId) {
+        return res.status(403).json({ error: "Akses ditolak. Anda tidak berhak menghapus laporan operator lain." });
+      }
+      if (report.status !== 'PENDING') {
+        return res.status(400).json({ error: "Laporan yang sudah disetujui (VALIDATED) tidak dapat dihapus oleh Operator." });
+      }
+    }
+    // ADMIN dan SUPER_ADMIN bebas menghapus laporan apa saja
+
+    // Lakukan Soft-Delete dengan menyetel tanggal deletedAt
+    const updatedReport = await prisma.report.update({
+      where: { id: parseInt(id) },
+      data: { deletedAt: new Date() }
+    });
+
+    res.json({ message: "Laporan berhasil dihapus sementara (ke tempat sampah).", data: updatedReport });
+  } catch (error) {
+    console.error("Gagal menghapus laporan:", error);
+    res.status(500).json({ error: "Gagal menghapus laporan dari server." });
+  }
+});
+
+// 2c. API GET TEMPAT SAMPAH (Trash - Khusus Super Admin dengan Auto-cleanup > 30 hari)
+app.get('/api/reports/trash', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({ error: "Akses ditolak. Hanya Super Admin yang dapat mengakses tempat sampah." });
+  }
+
+  try {
+    // 1. Pembersihan otomatis dokumen yang dihapus > 30 hari
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const expiredReports = await prisma.report.findMany({
+      where: {
+        deletedAt: {
+          lt: thirtyDaysAgo
+        }
+      }
+    });
+
+    for (const report of expiredReports) {
+      // Hapus berkas fisiknya dari server lokal
+      const filePath = path.join(__dirname, report.fileUrl);
+      if (fs.existsSync(filePath)) {
+        try {
+          fs.unlinkSync(filePath);
+        } catch (err) {
+          console.error(`Gagal menghapus berkas fisik ${filePath}:`, err);
+        }
+      }
+    }
+
+    // Hapus data permanen di database
+    if (expiredReports.length > 0) {
+      await prisma.report.deleteMany({
+        where: {
+          id: {
+            in: expiredReports.map(r => r.id)
+          }
+        }
+      });
+    }
+
+    // 2. Ambil laporan terhapus yang masih dalam rentang 30 hari
+    const trashReports = await prisma.report.findMany({
+      where: {
+        deletedAt: {
+          not: null
+        }
+      },
+      include: {
+        operator: {
+          select: { username: true }
+        }
+      },
+      orderBy: { deletedAt: 'desc' }
+    });
+
+    res.json(trashReports);
+  } catch (error) {
+    console.error("Gagal memuat tempat sampah:", error);
+    res.status(500).json({ error: "Gagal memuat data tempat sampah dari server." });
+  }
+});
+
+// 2d. API PATCH RESTORE LAPORAN (Khusus Super Admin)
+app.patch('/api/reports/:id/restore', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({ error: "Akses ditolak. Hanya Super Admin yang dapat memulihkan laporan." });
+  }
+
+  const { id } = req.params;
+  try {
+    const report = await prisma.report.findUnique({
+      where: { id: parseInt(id) }
+    });
+
+    if (!report) {
+      return res.status(404).json({ error: "Laporan tidak ditemukan." });
+    }
+
+    const restoredReport = await prisma.report.update({
+      where: { id: parseInt(id) },
+      data: { deletedAt: null }
+    });
+
+    res.json({ message: "Laporan berhasil dipulihkan.", data: restoredReport });
+  } catch (error) {
+    console.error("Gagal memulihkan laporan:", error);
+    res.status(500).json({ error: "Gagal memulihkan laporan dari server." });
+  }
+});
+
+
+// 3. API VALIDASI STATUS LAPORAN (Untuk Admin & Super Admin)
 app.patch('/api/reports/:id/status', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'ADMIN') {
-    return res.status(403).json({ error: "Akses ditolak. Hanya Admin Pelayanan yang dapat melakukan validasi." });
+  if (req.user.role !== 'ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({ error: "Akses ditolak. Hanya Admin atau Super Admin yang dapat melakukan validasi." });
   }
 
   const { id } = req.params;
@@ -247,10 +346,10 @@ app.patch('/api/reports/:id/status', authenticateToken, async (req, res) => {
   }
 });
 
-// 4. API GABUNG LAPORAN PAGI & MALAM (Untuk Admin)
+// 4. API GABUNG LAPORAN PAGI & MALAM (Untuk Admin & Super Admin)
 app.post('/api/reports/merge', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'ADMIN') {
-    return res.status(403).json({ error: "Akses ditolak. Hanya Admin Pelayanan yang dapat menggabungkan laporan." });
+  if (req.user.role !== 'ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({ error: "Akses ditolak. Hanya Admin atau Super Admin yang dapat menggabungkan laporan." });
   }
 
   const { date } = req.body;
@@ -265,14 +364,15 @@ app.post('/api/reports/merge', authenticateToken, async (req, res) => {
     const endOfDay = new Date(reportDate);
     endOfDay.setUTCHours(23, 59, 59, 999);
 
-    // Cari laporan Pagi dan Malam yang sudah divalidasi pada tanggal tersebut
+    // Cari laporan Pagi dan Malam yang sudah divalidasi pada tanggal tersebut (dan tidak terhapus)
     const reports = await prisma.report.findMany({
       where: {
         date: {
           gte: startOfDay,
           lte: endOfDay
         },
-        status: 'VALIDATED'
+        status: 'VALIDATED',
+        deletedAt: null
       }
     });
 
